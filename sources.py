@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-"""
-sources.py — God-level passive subdomain API aggregator for g4rxd v3.0.0
-
-Free APIs (no key):
-  crt.sh · certspotter · hackertarget · alienvault · rapiddns
-  wayback-cdx · urlscan · anubisdb · threatcrowd · riddler
-  bufferover · sitedossier · dnsbufferover · threatminer
-  recon.dev · jldc · netcraft(scrape) · subdomaincenter
-  leakix(free) · fullhunt(free-tier) · bevigil(free-tier)
-  certstream-public · ctsearch · virustotal(free-quota)
-  securitytrails(scrape) · dnsdumpster · shodan(scrape)
-
-Keyed APIs (optional, passed as args):
-  virustotal · securitytrails · binaryedge · shodan
-  censys · spyse · c99 · fullhunt · bevigil · netlas
-
-Usage:
-  python3 sources.py example.com [--vt-key VT] [--st-key ST] ...
-  Prints unique subdomains to stdout, errors to stderr.
-"""
 
 import sys
 import json
@@ -39,10 +18,8 @@ def emit(sub: str, domain: str):
     sub = sub.strip().lower()
     if not sub:
         return
-    # must end with domain
     if not (sub == domain or sub.endswith("." + domain)):
         return
-    # basic validity
     if not re.match(r"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$", sub):
         return
     if sub not in SEEN:
@@ -71,15 +48,10 @@ def _get_json(url: str, headers: dict = None, data: bytes = None) -> object:
 
 
 def _extract(text: str, domain: str):
-    """Regex-extract all matching subdomains from arbitrary text."""
     escaped = re.escape(domain)
     for m in re.findall(r"([a-zA-Z0-9_*.-]+\." + escaped + r")", text):
         emit(m.replace("*.", ""), domain)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  FREE SOURCES
-# ─────────────────────────────────────────────────────────────────────────────
 
 def src_crtsh(domain):
     d = _get_json(f"https://crt.sh/?q=%25.{domain}&output=json")
@@ -175,7 +147,6 @@ def src_riddler(domain):
 
 
 def src_bufferover(domain):
-    # dns.bufferover.run (free tier)
     d = _get_json(f"https://dns.bufferover.run/dns?q=.{domain}")
     if not d:
         return
@@ -221,7 +192,6 @@ def src_recondev(domain):
 
 
 def src_ctsearch(domain):
-    # ctsearch.entrust.com public CT log search
     d = _get_json(
         f"https://ctsearch.entrust.com/api/v1/certificates"
         f"?fields=subjectDN&domain={domain}&includeExpired=true&exactMatch=false&limit=5000"
@@ -237,7 +207,6 @@ def src_ctsearch(domain):
 
 
 def src_leakix(domain):
-    # LeakIX free tier (no key needed for basic)
     raw = _get(
         f"https://leakix.net/domain/{domain}",
         headers={"Accept": "application/json"}
@@ -246,7 +215,6 @@ def src_leakix(domain):
 
 
 def src_certstream_web(domain):
-    # certstream-web public endpoint
     raw = _get(f"https://certstream.calidog.io/domains/{domain}")
     _extract(raw, domain)
 
@@ -268,7 +236,6 @@ def src_shodan_scrape(domain):
 
 
 def src_dnsdumpster(domain):
-    # DNSdumpster: get CSRF then POST
     home = _get("https://dnsdumpster.com/")
     m = re.search(r"csrfmiddlewaretoken.*?value=['\"]([^'\"]+)", home)
     if not m:
@@ -305,10 +272,6 @@ def src_bevigil_free(domain):
     raw = _get(f"https://osint.bevigil.com/api/{domain}/subdomains/")
     _extract(raw, domain)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  KEYED SOURCES (only run if key supplied)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def src_virustotal(domain, key):
     cursor = ""
@@ -457,10 +420,6 @@ def src_netlas(domain, key):
         emit(item.get("data", {}).get("domain", ""), domain)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ORCHESTRATOR
-# ─────────────────────────────────────────────────────────────────────────────
-
 FREE_SOURCES = [
     src_crtsh, src_certspotter, src_hackertarget, src_alienvault,
     src_rapiddns, src_wayback, src_urlscan, src_anubisdb, src_threatcrowd,
@@ -490,12 +449,10 @@ def main():
     args = parser.parse_args()
     domain = args.domain.lower().strip()
 
-    # ── Run all free sources concurrently ────────────────────────────────────
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
         futures = [ex.submit(fn, domain) for fn in FREE_SOURCES]
         concurrent.futures.wait(futures)
 
-    # ── Run keyed sources if keys provided ───────────────────────────────────
     keyed_tasks = []
     if args.vt_key:
         keyed_tasks.append((src_virustotal, (domain, args.vt_key)))

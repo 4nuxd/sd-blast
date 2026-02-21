@@ -1,31 +1,4 @@
 #!/bin/bash
-# =============================================================================
-#   G4RXD v3.2.0 — God-Level Subdomain Enumerator
-#   Author  : g4rxd
-#
-#   TOOL CHAIN (auto-detected, all run in PARALLEL):
-#     subfinder · amass · sublist3r · findomain · chaos · github-subdomains
-#     assetfinder · gau · theHarvester · waybackurls · dnsx · knockpy
-#     fierce · cero · shosubgo · shuffledns · puredns · tlsx
-#
-#   API SOURCES (no-key, run concurrently via sources.py):
-#     crt.sh · certspotter · hackertarget · alienvault · rapiddns
-#     wayback-cdx · urlscan · anubisdb · threatcrowd · riddler
-#     bufferover · dnsdumpster · shodan-scrape · bevigil(free)
-#     recon.dev · jldc · sitedossier · netcraft · dnsbufferover
-#     threatminer · passivetotal(free) · leakix · fullhunt(free)
-#     certstream · virustotal(free) · securitytrails(scrape)
-#
-#   API SOURCES (key required, loaded from ~/.g4rxd_keys):
-#     virustotal · shodan · censys · binaryedge · securitytrails
-#     spyse · c99 · fullhunt · bevigil · github · netlas · chaos
-#
-#   EXTRAS:
-#     DNS brute-force (5000+ word built-in wordlist, threaded) — opt-in via -b
-#     DNS resolution filter (threaded, keep live only)
-#     HTTP/HTTPS probe (httpx or Python fallback)
-#     Zone transfer attempt
-# =============================================================================
 
 RED="\033[1;31m"
 GREEN="\033[1;32m"
@@ -38,9 +11,6 @@ RESET="\033[0m"
 BOLD="\033[1m"
 DIM="\033[2m"
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  BANNER
-# ─────────────────────────────────────────────────────────────────────────────
 BANNER_TEXT='
  ██████╗ ██╗  ██╗██████╗ ██╗  ██╗██████╗
 ██╔════╝ ██║  ██║██╔══██╗╚██╗██╔╝██╔══██╗
@@ -75,6 +45,7 @@ usage() {
   echo -e "  ${GREEN}-z${RESET}           Skip zone transfer attempt"
   echo -e "  ${GREEN}-v${RESET}           Verbose — show per-source counts"
   echo -e "  ${GREEN}-k <file>${RESET}    API key file (default: ~/.g4rxd_keys)"
+  echo -e "  ${GREEN}-vh <IP>${RESET}     VHost mode — brute-force virtual hosts on IP (for .htb/.thm)"
   echo -e "  ${GREEN}-h${RESET}           Help"
   echo ""
   echo -e "${YELLOW}${BOLD}API key file format  (~/.g4rxd_keys):${RESET}"
@@ -107,13 +78,13 @@ skip()    { [[ "$VERBOSE" == true ]] && echo -e "${DIM}[~] SKIP: $*${RESET}"; }
 
 banner
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
 DOMAIN=""
 OUTPUT=""
 DO_RESOLVE=false
 DO_PROBE=false
 THREADS=100
 DO_BRUTE=false
+VHOST_IP=""
 SKIP_ZONETRANSFER=false
 VERBOSE=false
 KEY_FILE="$HOME/.g4rxd_keys"
@@ -128,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     -p) DO_PROBE=true;      shift ;;
     -t) THREADS="$2";       shift 2 ;;
       -b) DO_BRUTE=true;      shift ;;
+      -vh) VHOST_IP="$2";     DO_BRUTE=true; shift 2 ;;
         -z) SKIP_ZONETRANSFER=true; shift ;;
       -v) VERBOSE=true;       shift ;;
       -k) KEY_FILE="$2";      shift 2 ;;
@@ -142,7 +114,6 @@ done
 
 [[ -z "$DOMAIN" ]] && { echo -e "${RED}[✗] No domain specified.${RESET}"; usage; }
 
-# -4 / -c imply -p
 [[ "$NO_404"      == true ]] && DO_PROBE=true
 [[ "$CF_WAIT"    == true ]] && DO_PROBE=true
 [[ "$RATE_LIMIT"  == true ]] && DO_PROBE=true
@@ -150,7 +121,6 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ── Load API keys ─────────────────────────────────────────────────────────────
 declare -A KEYS
 if [[ -f "$KEY_FILE" ]]; then
   while IFS='=' read -r k v; do
@@ -159,7 +129,6 @@ if [[ -f "$KEY_FILE" ]]; then
   done < "$KEY_FILE"
 fi
 
-# ── Temp workspace ────────────────────────────────────────────────────────────
 WORKDIR=$(mktemp -d /tmp/g4rxd_XXXXXX)
 RAW="$WORKDIR/raw.txt"
 LIVE_FILE="$WORKDIR/live.txt"
@@ -174,7 +143,6 @@ log "Threads    : ${WHITE}$THREADS${RESET}"
 log "Resolve    : ${WHITE}$DO_RESOLVE${RESET}  |  Probe: ${WHITE}$DO_PROBE${RESET}  |  CF-Wait: ${WHITE}$CF_WAIT${RESET}  |  RateLimit: ${WHITE}$RATE_LIMIT${RESET}  |  Brute: ${WHITE}$DO_BRUTE${RESET}"
 echo ""
 
-# ── Helper: stream subdomains from a temp file into the raw pool ──────────────
 add_file() {
   local src="$1" file="$2"
   local before after new_count
@@ -190,9 +158,6 @@ add_file() {
   fi
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ZONE TRANSFER ATTEMPT  (sequential — small, fast)
-# ─────────────────────────────────────────────────────────────────────────────
 if [[ "$SKIP_ZONETRANSFER" == false ]]; then
   step "Zone transfer attempt..."
   NS_LIST=$(dig +short NS "$DOMAIN" 2>/dev/null | sed 's/\.$//g')
@@ -211,10 +176,6 @@ if [[ "$SKIP_ZONETRANSFER" == false ]]; then
   [[ "$ZONE_FOUND" == false ]] && skip "Zone transfer failed/blocked (normal)"
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  PARALLEL TOOL SOURCES
-#  Each tool writes to its own temp file, then we merge after all finish.
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 step "${BOLD}Launching all tools in parallel...${RESET}"
 echo ""
@@ -223,7 +184,6 @@ TOOL_PIDS=()
 TOOL_NAMES=()
 TOOL_FILES=()
 
-# ── helper: register a background job ────────────────────────────────────────
 _launch() {
   local name="$1"; shift
   local tmpf="$WORKDIR/tool_${name}.txt"
@@ -236,35 +196,30 @@ _launch() {
   echo -e "  ${BLUE}⟳${RESET} ${WHITE}$name${RESET} ${DIM}(pid $pid)${RESET}"
 }
 
-# ── 1. Subfinder ─────────────────────────────────────────────────────────────
 if command -v subfinder &>/dev/null; then
   _launch "subfinder" subfinder -silent -all -d "$DOMAIN"
 else
   skip "subfinder not installed  (go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest)"
 fi
 
-# ── 2. Amass ──────────────────────────────────────────────────────────────────
 if command -v amass &>/dev/null; then
   _launch "amass" amass enum -passive -norecursive -d "$DOMAIN"
 else
   skip "amass not installed  (sudo apt install amass)"
 fi
 
-# ── 3. Assetfinder ────────────────────────────────────────────────────────────
 if command -v assetfinder &>/dev/null; then
   _launch "assetfinder" assetfinder --subs-only "$DOMAIN"
 else
   skip "assetfinder not installed  (go install github.com/tomnomnom/assetfinder@latest)"
 fi
 
-# ── 4. Findomain ──────────────────────────────────────────────────────────────
 if command -v findomain &>/dev/null; then
   _launch "findomain" findomain --quiet -t "$DOMAIN"
 else
   skip "findomain not installed  (sudo apt install findomain)"
 fi
 
-# ── 5. Sublist3r ──────────────────────────────────────────────────────────────
 if command -v sublist3r &>/dev/null; then
   _launch "sublist3r" sublist3r -n -d "$DOMAIN" -o /dev/stdout
 elif python3 -c "import sublist3r" 2>/dev/null; then
@@ -279,7 +234,6 @@ else
   skip "sublist3r not installed  (sudo apt install sublist3r)"
 fi
 
-# ── 6. Gau (GetAllURLs) ───────────────────────────────────────────────────────
 if command -v gau &>/dev/null; then
   _launch "gau" bash -c "echo '$DOMAIN' | gau --subs 2>/dev/null \
     | grep -oE '([a-zA-Z0-9_-]+\.)+${DOMAIN//./\\.}' | sort -u"
@@ -287,7 +241,6 @@ else
   skip "gau not installed  (go install github.com/lc/gau/v2/cmd/gau@latest)"
 fi
 
-# ── 7. Waybackurls ────────────────────────────────────────────────────────────
 if command -v waybackurls &>/dev/null; then
   _launch "waybackurls" bash -c "echo '$DOMAIN' | waybackurls 2>/dev/null \
     | grep -oE '([a-zA-Z0-9_-]+\.)+${DOMAIN//./\\.}' | sort -u"
@@ -295,7 +248,6 @@ else
   skip "waybackurls not installed  (go install github.com/tomnomnom/waybackurls@latest)"
 fi
 
-# ── 8. TheHarvester ───────────────────────────────────────────────────────────
 if command -v theHarvester &>/dev/null || command -v theharvester &>/dev/null; then
   BIN_TH=$(command -v theHarvester 2>/dev/null || command -v theharvester)
   _launch "theHarvester" bash -c "$BIN_TH -d '$DOMAIN' -b all -f /dev/null 2>/dev/null \
@@ -304,21 +256,18 @@ else
   skip "theHarvester not installed  (sudo apt install theharvester)"
 fi
 
-# ── 9. Chaos (ProjectDiscovery) ───────────────────────────────────────────────
 if command -v chaos &>/dev/null && [[ -n "${KEYS[chaos]}" ]]; then
   _launch "chaos" chaos -d "$DOMAIN" -key "${KEYS[chaos]}" -silent
 else
   skip "chaos not found / no key  (go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest)"
 fi
 
-# ── 10. Github-subdomains ─────────────────────────────────────────────────────
 if command -v github-subdomains &>/dev/null && [[ -n "${KEYS[github]}" ]]; then
   _launch "github-subdomains" github-subdomains -d "$DOMAIN" -t "${KEYS[github]}" -raw
 else
   skip "github-subdomains not found / no token  (go install github.com/gwen001/github-subdomains@latest)"
 fi
 
-# ── 11. Knockpy ───────────────────────────────────────────────────────────────
 if command -v knockpy &>/dev/null; then
   KNOCK_OUT="$WORKDIR/knock"
   mkdir -p "$KNOCK_OUT"
@@ -335,7 +284,6 @@ else
   skip "knockpy not installed  (sudo apt install knockpy)"
 fi
 
-# ── 12. Fierce ────────────────────────────────────────────────────────────────
 if command -v fierce &>/dev/null; then
   _launch "fierce" bash -c "fierce --domain '$DOMAIN' 2>/dev/null \
     | grep -oE '([a-zA-Z0-9_-]+\.)+${DOMAIN//./\\.}' | sort -u"
@@ -343,7 +291,6 @@ else
   skip "fierce not installed  (sudo apt install fierce)"
 fi
 
-# ── 13. Cero (TLS cert scanner) ───────────────────────────────────────────────
 if command -v cero &>/dev/null; then
   _launch "cero" bash -c "cero '$DOMAIN' 2>/dev/null \
     | grep -oE '([a-zA-Z0-9_-]+\.)+${DOMAIN//./\\.}' | sort -u"
@@ -351,7 +298,6 @@ else
   skip "cero not installed  (go install github.com/glebarez/cero@latest)"
 fi
 
-# ── 14. Tlsx (TLS cert grab) ──────────────────────────────────────────────────
 if command -v tlsx &>/dev/null; then
   _launch "tlsx" bash -c "echo '$DOMAIN' | tlsx -san -cn -silent 2>/dev/null \
     | grep -oE '([a-zA-Z0-9_-]+\.)+${DOMAIN//./\\.}' | sort -u"
@@ -359,7 +305,6 @@ else
   skip "tlsx not installed  (go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest)"
 fi
 
-# ── 15. Shosubgo ──────────────────────────────────────────────────────────────
 if command -v shosubgo &>/dev/null && [[ -n "${KEYS[shodan]}" ]]; then
   _launch "shosubgo" bash -c "shosubgo -d '$DOMAIN' -a '${KEYS[shodan]}' 2>/dev/null \
     | grep -oE '([a-zA-Z0-9_-]+\.)+${DOMAIN//./\\.}' | sort -u"
@@ -367,7 +312,6 @@ else
   skip "shosubgo not found / no shodan key  (go install github.com/incogbyte/shosubgo@latest)"
 fi
 
-# ── 16. Shuffledns ────────────────────────────────────────────────────────────
 if command -v shuffledns &>/dev/null; then
   _launch "shuffledns" bash -c "shuffledns -d '$DOMAIN' -mode bruteforce \
     -w '$SCRIPT_DIR/wordlist.txt' -r /dev/stdin -silent 2>/dev/null \
@@ -376,7 +320,6 @@ else
   skip "shuffledns not installed  (go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest)"
 fi
 
-# ── 17. Puredns ───────────────────────────────────────────────────────────────
 if command -v puredns &>/dev/null; then
   _launch "puredns" bash -c "puredns bruteforce '$SCRIPT_DIR/wordlist.txt' '$DOMAIN' \
     --resolvers <(echo '8.8.8.8') 2>/dev/null \
@@ -385,7 +328,6 @@ else
   skip "puredns not installed  (go install github.com/d3mondev/puredns/v2@latest)"
 fi
 
-# ── 18. Dnsx (passive resolve) ────────────────────────────────────────────────
 if command -v dnsx &>/dev/null; then
   _launch "dnsx" bash -c "echo '$DOMAIN' | dnsx -silent -a -resp-only \
     -r 8.8.8.8,1.1.1.1,9.9.9.9 -t '$THREADS' 2>/dev/null"
@@ -393,7 +335,6 @@ else
   skip "dnsx not installed  (go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest)"
 fi
 
-# ── 19. Python API aggregator (sources.py — 25+ concurrent sources) ──────────
 _launch "sources.py" python3 "$SCRIPT_DIR/sources.py" "$DOMAIN" \
   --vt-key  "${KEYS[virustotal]:-}" \
   --st-key  "${KEYS[securitytrails]:-}" \
@@ -407,18 +348,22 @@ _launch "sources.py" python3 "$SCRIPT_DIR/sources.py" "$DOMAIN" \
   --bv-key  "${KEYS[bevigil]:-}" \
   --nl-key  "${KEYS[netlas]:-}"
 
-# ── 20. DNS Brute-force (Python, built-in wordlist) — opt-in via -b ──────────
 if [[ "$DO_BRUTE" == true ]]; then
-  _launch "bruteforce" python3 "$SCRIPT_DIR/brute.py" "$DOMAIN" "$THREADS"
+  if [[ -n "$VHOST_IP" ]]; then
+    info "VHost mode enabled — hitting ${WHITE}$VHOST_IP${RESET} with Host: headers (bypassing DNS)"
+    _launch "vhost-brute" python3 "$SCRIPT_DIR/brute.py" "$DOMAIN" "$THREADS" \
+      --vhost "$VHOST_IP"
+  else
+    _launch "bruteforce" python3 "$SCRIPT_DIR/brute.py" "$DOMAIN" "$THREADS"
+  fi
 else
-  skip "DNS brute-force off (use -b to enable)"
+  skip "DNS brute-force off (use -b for DNS mode, -vh <IP> for VHost mode)"
 fi
 
-# ── Wait for ALL parallel jobs ────────────────────────────────────────────────
 echo ""
 step "${BOLD}Waiting for all parallel jobs to finish...${RESET}"
 
-TOTAL_TOOLS=${#TOOL_PIDS[@]}
+TOTAL_TOOLS=${
 DONE=0
 for i in "${!TOOL_PIDS[@]}"; do
   pid="${TOOL_PIDS[$i]}"
@@ -432,9 +377,6 @@ for i in "${!TOOL_PIDS[@]}"; do
   add_file "$name" "$file"
 done
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DE-DUPLICATE
-# ─────────────────────────────────────────────────────────────────────────────
 sort -u "$RAW" > "$OUTPUT.tmp"
 RAW_COUNT=$(wc -l < "$OUTPUT.tmp")
 
@@ -442,16 +384,12 @@ echo ""
 echo -e "${MAGENTA}─────────────────────────────────────────────────────────────${RESET}"
 success "Raw unique subdomains : ${WHITE}${BOLD}${RAW_COUNT}${RESET}"
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DNS RESOLUTION  (-r)
-# ─────────────────────────────────────────────────────────────────────────────
 LIVE_COUNT=0
 LIVE_OUT=""
 if [[ "$DO_RESOLVE" == true ]]; then
     echo ""
     step "Resolving DNS ($THREADS threads) with wildcard detection..."
     python3 "$SCRIPT_DIR/resolve.py" "$OUTPUT.tmp" "$THREADS" > "$LIVE_FILE" 2>&1
-    # Separate wildcard info lines from actual results
     grep -v "^\[" "$LIVE_FILE" | sort -u > "$WORKDIR/live_clean.txt" 2>/dev/null || true
     grep "^\[" "$LIVE_FILE" | while read -r line; do
         echo -e "  ${YELLOW}$line${RESET}"
@@ -464,9 +402,6 @@ if [[ "$DO_RESOLVE" == true ]]; then
     success "Live (DNS resolved)   : ${WHITE}${BOLD}${LIVE_COUNT}${RESET}  →  ${GREEN}$LIVE_OUT${RESET}"
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  HTTP PROBE  (-p)
-# ─────────────────────────────────────────────────────────────────────────────
 HTTP_COUNT=0
 HTTP_OUT=""
 if [[ "$DO_PROBE" == true ]]; then
@@ -475,7 +410,6 @@ if [[ "$DO_PROBE" == true ]]; then
   [[ "$DO_RESOLVE" == true ]] && PROBE_INPUT="$LIVE_FILE"
 
       step "HTTP probing ($THREADS threads)..."
-      # Detect projectdiscovery httpx (accepts -version) vs Python httpx (reject)
       HTTPX_BIN=""
       for _bin in ~/go/bin/httpx /usr/local/bin/httpx /usr/bin/httpx $(which httpx 2>/dev/null); do
         if "$_bin" -version &>/dev/null 2>&1; then
@@ -507,9 +441,6 @@ if [[ "$DO_PROBE" == true ]]; then
   fi
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  WRITE FINAL OUTPUT FILE  (banner header + stats + subdomain list)
-# ─────────────────────────────────────────────────────────────────────────────
 NOW=$(date '+%Y-%m-%d %H:%M:%S')
 
 {
@@ -534,9 +465,6 @@ cat "$OUTPUT.tmp"
 } > "$OUTPUT"
 rm -f "$OUTPUT.tmp"
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  FINAL SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${MAGENTA}═════════════════════════════════════════════════════════════${RESET}"
 echo -e "${CYAN}${BOLD}  G4RXD v3.2.0  —  Scan Complete${RESET}"

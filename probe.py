@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-probe.py — HTTP/HTTPS prober for g4rxd
-Usage: python3 probe.py <input_file> <threads> [--no-404] [--cf-wait] [--rate-limit]
-
---no-404      Drop subdomains that return HTTP 404.
---cf-wait     When Cloudflare 503 "Loading Page" is detected, wait CF_WAIT seconds then
-              access once (gives CF time to clear the challenge).
---rate-limit  When 429 is received, back off with jitter and retry up to 3x.
-"""
 import sys
 import time
 import random
@@ -19,15 +9,14 @@ import re
 
 TIMEOUT      = 10
 SCHEMES      = ["https", "http"]
-CF_WAIT      = 5        # seconds to wait before re-accessing CF challenge page
-RL_BASE_WAIT = 5        # base seconds to wait on 429
-RL_MAX_TRIES = 3        # max retries on 429
+CF_WAIT      = 5
+RL_BASE_WAIT = 5
+RL_MAX_TRIES = 3
 
 CF_TITLES    = {"loading page", "just a moment", "attention required", "cloudflare"}
 CF_BODY_SIGS = ["cf-browser-verification", "ray id", "checking your browser",
                 "enable javascript", "ddos protection by cloudflare"]
 
-# Global shutdown flag — set on SIGINT/SIGTERM
 _shutdown = False
 
 def _handle_signal(sig, frame):
@@ -49,7 +38,6 @@ def is_cf_challenge(code, title, body=""):
     return (t in CF_TITLES) or any(sig in b for sig in CF_BODY_SIGS)
 
 def fetch(url, extra_headers=None):
-    """Return (status, title, body) or None on total failure."""
     if _shutdown:
         return None
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -71,7 +59,6 @@ def fetch(url, extra_headers=None):
         return None
 
 def interruptible_sleep(seconds):
-    """Sleep in small slices so SIGINT is noticed quickly."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if _shutdown:
@@ -94,7 +81,6 @@ def probe(subdomain, no_404=False, cf_wait=False, rate_limit=False):
             continue
         code, title, body = result
 
-        # 429 rate-limited — back off with jitter and retry
         if rate_limit and code == 429:
             for attempt in range(1, RL_MAX_TRIES + 1):
                 if _shutdown:
@@ -110,7 +96,6 @@ def probe(subdomain, no_404=False, cf_wait=False, rate_limit=False):
                 if code != 429:
                     break
 
-        # CF JS challenge — wait then visit once; suppress if still blocked
         if cf_wait and is_cf_challenge(code, title, body):
             interruptible_sleep(CF_WAIT)
             if _shutdown:
@@ -119,7 +104,6 @@ def probe(subdomain, no_404=False, cf_wait=False, rate_limit=False):
             if retried is None:
                 return None
             code, title, body = retried
-            # still a CF challenge after wait — can't bypass without real browser
             if is_cf_challenge(code, title, body):
                 return None
 
